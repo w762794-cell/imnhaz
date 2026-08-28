@@ -3,4 +3,5 @@ Flask==3.1.2
 edge-tts==7.2.3
 deep-translator==1.11.4
 pydub==0.25.1
+pyaudioop
 faster-whisper==1.2.0
