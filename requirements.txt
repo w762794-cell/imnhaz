@@ -2,3 +2,4 @@ python-telegram-bot
 edge-tts
 openai-whisper
 deep-translator
+flask
