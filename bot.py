@@ -257,10 +257,28 @@ async def handle_translate(update, context, input_path, ext, work_dir):
         await update.message.reply_text("សូមផ្ញើឯកសារ .srt ប៉ុណ្ណោះសម្រាប់មុខងារនេះ")
         return
 
-    await update.message.reply_text("កំពុងបកប្រែ... 🌐")
+    status_msg = await update.message.reply_text("កំពុងបកប្រែ... 🌐")
     out_path = os.path.join(work_dir, "translated_km.srt")
-    translate_srt_file(input_path, out_path, target_lang="km")
 
+    # translate_srt_file ប្រើ time.sleep() ខាងក្នុង (ដើម្បីជៀសវាង rate-limit ពី Google)
+    # ដូច្នេះត្រូវរត់ក្នុង background thread ដើម្បីកុំឲ្យ block bot ទាំងមូល
+    task = asyncio.create_task(
+        asyncio.to_thread(translate_srt_file, input_path, out_path, "km")
+    )
+    elapsed = 0
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        except asyncio.TimeoutError:
+            elapsed += 10
+            try:
+                await status_msg.edit_text(f"កំពុងបកប្រែ... 🌐 ({elapsed} វិនាទី)")
+            except Exception:
+                pass
+
+    task.result()  # បើ error កើតឡើង នឹង raise ត្រឡប់ទៅ caller (ចាប់ដោយ try/except ខាងក្រៅ)
+
+    await status_msg.edit_text("បកប្រែរួចរាល់! ✅")
     with open(out_path, "rb") as f:
         await update.message.reply_document(f, filename="translated_km.srt")
 
