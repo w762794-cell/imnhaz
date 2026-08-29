@@ -257,24 +257,50 @@ async def handle_translate(update, context, input_path, ext, work_dir):
         await update.message.reply_text("សូមផ្ញើឯកសារ .srt ប៉ុណ្ណោះសម្រាប់មុខងារនេះ")
         return
 
-    status_msg = await update.message.reply_text("កំពុងបកប្រែ... 🌐")
+    status_msg = await update.message.reply_text("កំពុងបកប្រែ... 🌐 0%")
     out_path = os.path.join(work_dir, "translated_km.srt")
 
-    # translate_srt_file ប្រើ time.sleep() ខាងក្នុង (ដើម្បីជៀសវាង rate-limit ពី Google)
+    progress_state = {"current": 0, "total": None}
+
+    def _progress_cb(current, total):
+        progress_state["current"] = current
+        progress_state["total"] = total
+
+    # translate_srt_file ប្រើ time.sleep() ខាងក្នុង (ដើម្បីជៀសវាង rate-limit ពី translator)
     # ដូច្នេះត្រូវរត់ក្នុង background thread ដើម្បីកុំឲ្យ block bot ទាំងមូល
     task = asyncio.create_task(
-        asyncio.to_thread(translate_srt_file, input_path, out_path, "km")
+        asyncio.to_thread(translate_srt_file, input_path, out_path, "km", 3, 0.6, _progress_cb)
     )
+
     elapsed = 0
+    last_reported_pct = -1
+    MAX_WAIT_SECONDS = 8 * 60  # បើលើសពី ៨ នាទីនៅតែគ្មានវឌ្ឍនភាព -> បោះបង់ ជំនួសគាំងជានិច្ច
+
     while not task.done():
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except asyncio.TimeoutError:
-            elapsed += 10
-            try:
-                await status_msg.edit_text(f"កំពុងបកប្រែ... 🌐 ({elapsed} វិនាទី)")
-            except Exception:
-                pass
+            elapsed += 5
+
+            if elapsed >= MAX_WAIT_SECONDS:
+                task.cancel()
+                await status_msg.edit_text(
+                    "❌ ការបកប្រែចំណាយពេលយូរពេក (លើសពី 8 នាទី) ដូច្នេះខ្ញុំបានបោះបង់។\n\n"
+                    "ជាទូទៅមូលហេតុគឺ translator engine ទាំង ២ ត្រូវបានទប់ស្កាត់ជាបណ្តោះអាសន្ន។ "
+                    "សូមសាកល្បងម្តងទៀតក្រោយពីប្រាំនាទី។"
+                )
+                return
+
+            total = progress_state["total"]
+            current = progress_state["current"]
+            if total:
+                pct = min(int(current / total * 100), 99)
+                if pct != last_reported_pct:
+                    last_reported_pct = pct
+                    try:
+                        await status_msg.edit_text(f"កំពុងបកប្រែ... 🌐 {pct}%")
+                    except Exception:
+                        pass
 
     task.result()  # បើ error កើតឡើង នឹង raise ត្រឡប់ទៅ caller (ចាប់ដោយ try/except ខាងក្រៅ)
 
