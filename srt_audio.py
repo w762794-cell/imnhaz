@@ -113,7 +113,9 @@ async def build_audio_from_srt(srt_path: str, out_mp3_path: str, work_dir: str,
         raw_path = os.path.join(work_dir, f"seg_{i}.mp3")
 
         await _tts_to_file(text, voice, raw_path)
-        segment = AudioSegment.from_file(raw_path, format="mp3")
+        # AudioSegment.from_file ជា sync/blocking call -> រត់ក្នុង thread ដើម្បីកុំឲ្យ
+        # ស្ទះ event loop របស់ bot (សំខាន់ណាស់ជាមួយ file វែងៗ)
+        segment = await asyncio.to_thread(AudioSegment.from_file, raw_path, format="mp3")
 
         target_ms = int((sub.end - sub.start).total_seconds() * 1000)
         target_ms = max(target_ms, 200)  # យ៉ាងតិចបំផុត 0.2 វិនាទី
@@ -123,15 +125,19 @@ async def build_audio_from_srt(srt_path: str, out_mp3_path: str, work_dir: str,
         if actual_ms > target_ms and actual_ms > 0:
             speed_ratio = actual_ms / target_ms
             speed_ratio = min(speed_ratio, 1.8)  # កុំបង្កើនល្បឿនលើសហេតុផល
-            segment = _speed_change(segment, speed_ratio)
+            # _speed_change ហៅ ffmpeg subprocess (blocking) -> ត្រូវរត់ក្នុង thread ដែរ
+            # ដើម្បីកុំឲ្យ bot ឈប់ឆ្លើយតបនឹង message ផ្សេងទៀតខណៈកំពុងកែសម្រួលល្បឿន
+            segment = await asyncio.to_thread(_speed_change, segment, speed_ratio)
 
         start_ms = int(sub.start.total_seconds() * 1000)
-        timeline = timeline.overlay(segment, position=start_ms)
+        # overlay ក៏ជា CPU-bound blocking operation ដែរ (កាន់តែយឺតពេល timeline ធំឡើង)
+        timeline = await asyncio.to_thread(timeline.overlay, segment, start_ms)
 
         os.remove(raw_path)
 
         if progress_cb:
             await progress_cb(i + 1, len(subs))
 
-    timeline.export(out_mp3_path, format="mp3", bitrate="192k")
+    # export ក៏ជា blocking operation -> រត់ក្នុង thread ដែរ
+    await asyncio.to_thread(timeline.export, out_mp3_path, format="mp3", bitrate="192k")
     return out_mp3_path
