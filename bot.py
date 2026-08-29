@@ -1,11 +1,13 @@
 """
 bot.py
 ------
-Telegram Bot ដែលមាន 3 មុខងារ:
+Telegram Bot ដែលមាន 4 មុខងារ:
   1) /srt2audio  -> ផ្ញើ file .srt -> bot បំលែងទៅជា audio (.mp3) អានតាមពេលវេលា
                      ដោយឆ្លាស់សំឡេងប្រុស/ស្រី
   2) /translate  -> ផ្ញើ file .srt -> bot បកប្រែទៅជាភាសាខ្មែរ ហើយផ្ញើ .srt ថ្មីត្រឡប់មកវិញ
   3) /transcribe -> ផ្ញើ file .mp3 ឬ .mp4 -> bot ស្តាប់ ហើយបំលែងទៅជាអត្ថបទ + .srt
+  4) /fullpipeline -> ផ្ញើ file .mp3/.mp4 (ជាភាសាណាមួយ) -> bot Transcribe -> បកប្រែជាខ្មែរ
+                       -> បំលែងជាសំឡេងខ្មែរ (ភ្ជាប់ជំហានទាំង ៣ ខាងលើចូលគ្នា)
 
 របៀបដំណើរការ:
   python bot.py
@@ -69,6 +71,7 @@ logger = logging.getLogger(__name__)
 MODE_SRT2AUDIO = "srt2audio"
 MODE_TRANSLATE = "translate"
 MODE_TRANSCRIBE = "transcribe"
+MODE_FULL_PIPELINE = "full_pipeline"
 
 # --- ជម្រើសសំឡេងសម្រាប់ SRT -> Audio ---
 VOICE_MALE = "voice_male"
@@ -81,6 +84,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔊 SRT -> Audio (ប្រុស/ស្រី)", callback_data=MODE_SRT2AUDIO)],
         [InlineKeyboardButton("🌐 បកប្រែ SRT ជាភាសាខ្មែរ", callback_data=MODE_TRANSLATE)],
         [InlineKeyboardButton("📝 Transcribe MP3 / MP4", callback_data=MODE_TRANSCRIBE)],
+        [InlineKeyboardButton("🎙️ MP3/MP4 -> សំឡេងខ្មែរ (Full)", callback_data=MODE_FULL_PIPELINE)],
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -107,9 +111,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     mode = query.data
 
-    if mode == MODE_SRT2AUDIO:
-        # សម្រាប់ SRT -> Audio ត្រូវសួរជម្រើសសំឡេងជាមុនសិន
-        context.user_data["mode"] = MODE_SRT2AUDIO
+    if mode in (MODE_SRT2AUDIO, MODE_FULL_PIPELINE):
+        # ទាំង SRT->Audio និង Full Pipeline ត្រូវការសួរជម្រើសសំឡេងជាមុនសិន
+        context.user_data["mode"] = mode
         await query.edit_message_text(
             "សូមជ្រើសរើសសំឡេងដែលអ្នកចង់បាន:",
             reply_markup=voice_choice_keyboard(),
@@ -135,16 +139,28 @@ async def voice_choice_callback(update: Update, context: ContextTypes.DEFAULT_TY
         VOICE_ALTERNATE: "alternate",
     }
     context.user_data["voice_mode"] = voice_mode_map.get(choice, "alternate")
-    context.user_data["mode"] = MODE_SRT2AUDIO
+    # mode ត្រូវបានកំណត់រួចហើយនៅក្នុង menu_callback (srt2audio ឬ full_pipeline)
+    # មិនត្រូវបង្ខំសរសេរជាន់លើទេ ដើម្បីរក្សា mode ដើមឲ្យបានត្រឹមត្រូវ
+    mode = context.user_data.get("mode", MODE_SRT2AUDIO)
 
     labels = {
         VOICE_MALE: "សំឡេងប្រុស Piseth 👨",
         VOICE_FEMALE: "សំឡេងស្រី Sreymom 👩",
         VOICE_ALTERNATE: "ឆ្លាស់គ្នា Piseth+Sreymom 👫",
     }
+
+    if mode == MODE_FULL_PIPELINE:
+        next_prompt = (
+            "សូមផ្ញើឯកសារ .mp3 ឬ .mp4 មកខ្ញុំ ខ្ញុំនឹង Transcribe -> បកប្រែជាខ្មែរ "
+            "-> បំលែងជាសំឡេងខ្មែរ ជាមួយគ្នា 🎙️\n\n"
+            "⚠️ ចំណាំ៖ ដំណើរការនេះមានជំហានច្រើន នឹងចំណាយពេលយូរជាងធម្មតា "
+            "(អាចដល់ ១៥-៣០ នាទី អាស្រ័យលើប្រវែង file)"
+        )
+    else:
+        next_prompt = "សូមផ្ញើឯកសារ .srt មកខ្ញុំ ខ្ញុំនឹងបំលែងទៅជាសំឡេង 🔊"
+
     await query.edit_message_text(
-        f"បានជ្រើសរើស: {labels.get(choice, '')}\n\n"
-        "សូមផ្ញើឯកសារ .srt មកខ្ញុំ ខ្ញុំនឹងបំលែងទៅជាសំឡេង 🔊"
+        f"បានជ្រើសរើស: {labels.get(choice, '')}\n\n{next_prompt}"
     )
 
 
@@ -200,6 +216,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await handle_translate(update, context, input_path, ext, work_dir)
             elif mode == MODE_TRANSCRIBE:
                 await handle_transcribe(update, context, input_path, ext, work_dir)
+            elif mode == MODE_FULL_PIPELINE:
+                await handle_full_pipeline(update, context, input_path, ext, work_dir)
         except Exception as e:
             logger.exception("Processing failed")
             await update.message.reply_text(f"❌ មានបញ្ហា: {e}")
@@ -401,6 +419,137 @@ async def handle_transcribe(update, context, input_path, ext, work_dir):
     ).strip()
     if plain_text and len(plain_text) < 3500:
         await update.message.reply_text(f"អត្ថបទដែលបានស្តាប់ចេញ:\n\n{plain_text}")
+
+
+async def _run_with_progress(status_msg, task, phase_label: str, progress_state: dict,
+                              max_wait_seconds: int = 8 * 60):
+    """
+    Helper រួម សម្រាប់ដំណើរការ task ណាមួយក្នុង background ខណៈពេល update
+    status message ជាភាគរយ។ ត្រឡប់ True បើជោគជ័យ, False បើ timeout (status_msg
+    ត្រូវបាន update រួចជាមួយ error រួចហើយ)។
+    """
+    elapsed = 0
+    last_reported_pct = -1
+
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except asyncio.TimeoutError:
+            elapsed += 5
+
+            if elapsed >= max_wait_seconds:
+                task.cancel()
+                await status_msg.edit_text(
+                    f"❌ {phase_label} ចំណាយពេលយូរពេក ដូច្នេះខ្ញុំបានបោះបង់។\n\n"
+                    "សូមសាកល្បងជាមួយ file ខ្លីជាង ឬសាកល្បងម្តងទៀតក្រោយ។"
+                )
+                return False
+
+            total = progress_state.get("total")
+            current = progress_state.get("current", 0)
+            if total:
+                pct = min(int(current / total * 100), 99)
+                if pct != last_reported_pct:
+                    last_reported_pct = pct
+                    try:
+                        await status_msg.edit_text(f"{phase_label}... {pct}%")
+                    except Exception:
+                        pass
+            elif elapsed % 20 == 0:
+                try:
+                    await status_msg.edit_text(f"{phase_label}... ({elapsed} វិនាទី)")
+                except Exception:
+                    pass
+
+    task.result()  # raise ឡើងវិញបើមាន exception
+    return True
+
+
+async def handle_full_pipeline(update, context, input_path, ext, work_dir):
+    """
+    ភ្ជាប់ជំហានទាំង ៣ ចូលគ្នា៖ Transcribe -> បកប្រែជាខ្មែរ -> បំលែងជាសំឡេងខ្មែរ
+    """
+    if ext not in (".mp3", ".mp4", ".wav", ".m4a", ".ogg", ".mov", ".mkv"):
+        await update.message.reply_text("សូមផ្ញើឯកសារ .mp3 ឬ .mp4 សម្រាប់មុខងារនេះ")
+        return
+
+    voice_mode = context.user_data.get("voice_mode", "alternate")
+    voice_label = {
+        "male": "Piseth 👨",
+        "female": "Sreymom 👩",
+        "alternate": "Piseth+Sreymom 👫",
+    }.get(voice_mode, "Piseth+Sreymom 👫")
+
+    model_size = os.environ.get("WHISPER_MODEL_SIZE", "base")
+    step_srt = os.path.join(work_dir, "step1_transcript.srt")
+    step_translated = os.path.join(work_dir, "step2_translated_km.srt")
+    step_audio = os.path.join(work_dir, "step3_khmer_audio.mp3")
+
+    # === ជំហានទី ១: Transcribe ===
+    status_msg = await update.message.reply_text("[1/3] កំពុងស្តាប់ (Transcribe) 📝 0%")
+    progress_state = {"current": 0, "total": None}
+
+    def _cb1(current_seconds, total_seconds):
+        progress_state["current"] = current_seconds
+        progress_state["total"] = total_seconds
+
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            transcribe_to_srt, input_path, step_srt, work_dir, None, model_size, _cb1
+        )
+    )
+    ok = await _run_with_progress(status_msg, task, "[1/3] កំពុងស្តាប់ (Transcribe) 📝", progress_state)
+    if not ok:
+        return
+
+    # === ជំហានទី ២: បកប្រែជាខ្មែរ ===
+    await status_msg.edit_text("[2/3] កំពុងបកប្រែជាខ្មែរ 🌐 0%")
+    progress_state = {"current": 0, "total": None}
+
+    def _cb2(current, total):
+        progress_state["current"] = current
+        progress_state["total"] = total
+
+    task = asyncio.create_task(
+        asyncio.to_thread(translate_srt_file, step_srt, step_translated, "km", 3, 0.6, _cb2)
+    )
+    ok = await _run_with_progress(status_msg, task, "[2/3] កំពុងបកប្រែជាខ្មែរ 🌐", progress_state)
+    if not ok:
+        return
+
+    # === ជំហានទី ៣: បំលែងជាសំឡេងខ្មែរ ===
+    await status_msg.edit_text(f"[3/3] កំពុងបំលែងជាសំឡេង ({voice_label}) 🔊 0%")
+    progress_state = {"current": 0, "total": None}
+
+    async def _cb3(current, total):
+        # ចំណាំ៖ progress_cb របស់ build_audio_from_srt ត្រូវជា async function (មាន await ខាងក្នុង)
+        progress_state["current"] = current
+        progress_state["total"] = total
+
+    # ចំណាំ៖ build_audio_from_srt ជា async function រួចហើយ (មាន await edge_tts ខាងក្នុង)
+    # ដូច្នេះហៅផ្ទាល់ជា coroutine តាមរយៈ create_task, មិនមែនតាម asyncio.to_thread ទេ
+    # (to_thread សម្រាប់តែ sync function ប៉ុណ្ណោះ)
+    task = asyncio.create_task(
+        build_audio_from_srt(step_translated, step_audio, work_dir, voice_mode, _cb3)
+    )
+    ok = await _run_with_progress(
+        status_msg, task, f"[3/3] កំពុងបំលែងជាសំឡេង ({voice_label}) 🔊", progress_state
+    )
+    if not ok:
+        return
+
+    await status_msg.edit_text("បញ្ចប់! កំពុងផ្ញើលទ្ធផល... ✅")
+
+    # ផ្ញើទាំង ២ ឯកសារ៖ SRT ខ្មែរ (សម្រាប់កែសម្រួល) និង MP3 ចុងក្រោយ
+    with open(step_translated, "rb") as f:
+        await update.message.reply_document(f, filename="translated_km.srt")
+
+    with open(step_audio, "rb") as f:
+        await update.message.reply_document(
+            document=f,
+            filename="khmer_voice.mp3",
+            caption="សំឡេងខ្មែររួចរាល់! 🎙️",
+        )
 
 
 def main():
