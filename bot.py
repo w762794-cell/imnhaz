@@ -19,6 +19,10 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# httpx logs the full request URL (including the bot token) at INFO level.
+# Silence it so the token never ends up in Render's logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 
 # Free Microsoft neural voices (same catalog Edge browser's "Read aloud" uses).
