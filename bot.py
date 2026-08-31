@@ -174,22 +174,16 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
     subs = parse_srt(srt_path)
     tmp_dir = tempfile.mkdtemp()
 
-    timeline = AudioSegment.silent(duration=0)
-    current_ms = 0
+    # First pass: generate (and tempo-fit) every line's audio, and remember
+    # the exact SRT start time it belongs at. We don't place anything on a
+    # timeline yet.
+    segments = []  # list of (start_ms, AudioSegment)
+    total_duration_ms = 0
 
     for i, sub in enumerate(subs):
         start_ms = int(sub.start.total_seconds() * 1000)
         end_ms = int(sub.end.total_seconds() * 1000)
         slot_duration_ms = max(end_ms - start_ms, 200)
-
-        # Insert silence so this line starts exactly at its SRT timestamp
-        if start_ms > current_ms:
-            timeline += AudioSegment.silent(duration=start_ms - current_ms)
-            current_ms = start_ms
-        elif start_ms < current_ms:
-            # Previous line overran into this one's start time; just continue,
-            # we cannot move time backwards.
-            pass
 
         clean_text = strip_tags(sub.content)
 
@@ -207,12 +201,22 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
         else:
             seg_audio = AudioSegment.silent(duration=slot_duration_ms)
 
-        timeline += seg_audio
-        current_ms += len(seg_audio)
+        segments.append((start_ms, seg_audio))
+        total_duration_ms = max(total_duration_ms, start_ms + len(seg_audio), end_ms)
+
+    # Second pass: build a silent canvas spanning the whole file and overlay
+    # each line at its exact SRT start time. Placing lines by absolute
+    # position (instead of concatenating them one after another) means a
+    # line that runs slightly long can never push every later line out of
+    # sync -- each line's start time always matches the SRT exactly.
+    timeline = AudioSegment.silent(duration=total_duration_ms)
+    for start_ms, seg_audio in segments:
+        timeline = timeline.overlay(seg_audio, position=start_ms)
 
     output_path = os.path.join(tmp_dir, "output.mp3")
     timeline.export(output_path, format="mp3", bitrate="192k")
     return output_path
+
 
 
 # --------------------------------------------------------------------------
