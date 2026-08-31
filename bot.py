@@ -3,6 +3,7 @@ import re
 import logging
 import tempfile
 import asyncio
+import subprocess
 
 import srt
 import edge_tts
@@ -34,7 +35,8 @@ VOICES = {
 # In-memory map: chat_id -> path of the uploaded .srt file
 user_files: dict[int, str] = {}
 
-MAX_SPEEDUP = 1.6  # cap how much we speed up audio to fit a slot
+MAX_TEMPO = 2.2   # cap on how much we may speed up speech to fit a slot
+MIN_TEMPO = 0.75  # cap on how much we may slow speech down to fill a slot
 
 
 # --------------------------------------------------------------------------
@@ -125,12 +127,42 @@ def strip_tags(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text).strip()
 
 
-def speed_up(seg: AudioSegment, factor: float) -> AudioSegment:
-    """Speed up an AudioSegment by `factor` while keeping the same frame rate,
-    used so long TTS lines still roughly fit inside their subtitle slot."""
-    new_frame_rate = int(seg.frame_rate * factor)
-    sped = seg._spawn(seg.raw_data, overrides={"frame_rate": new_frame_rate})
-    return sped.set_frame_rate(seg.frame_rate)
+def _atempo_chain(factor: float) -> str:
+    """Build an ffmpeg 'atempo' filter chain for an arbitrary factor.
+    A single atempo filter only accepts 0.5-2.0, so factors outside that
+    range are split into multiple chained filters."""
+    filters = []
+    remaining = factor
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+    filters.append(f"atempo={remaining:.6f}")
+    return ",".join(filters)
+
+
+def time_stretch(seg: AudioSegment, factor: float) -> AudioSegment:
+    """Speed up or slow down `seg` by `factor` while keeping the same pitch/
+    voice character, using ffmpeg's atempo filter (no chipmunk/child-voice
+    effect like a naive frame-rate resample would cause)."""
+    if abs(factor - 1.0) < 0.02:
+        return seg  # difference is negligible, skip processing
+
+    tmp_dir = tempfile.mkdtemp()
+    in_path = os.path.join(tmp_dir, "in.wav")
+    out_path = os.path.join(tmp_dir, "out.wav")
+    seg.export(in_path, format="wav")
+
+    filter_chain = _atempo_chain(factor)
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", in_path, "-filter:a", filter_chain, out_path],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return AudioSegment.from_file(out_path, format="wav")
 
 
 async def tts_to_file(text: str, voice: str, out_path: str):
@@ -166,11 +198,12 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
             await tts_to_file(clean_text, voice, seg_path)
             seg_audio = AudioSegment.from_file(seg_path)
 
-            # If the generated speech is longer than its subtitle slot,
-            # speed it up a bit so timing stays close to the SRT.
-            if len(seg_audio) > slot_duration_ms > 0:
-                factor = min(len(seg_audio) / slot_duration_ms, MAX_SPEEDUP)
-                seg_audio = speed_up(seg_audio, factor)
+            # Nudge speech tempo so its duration lines up with its subtitle
+            # slot as closely as possible, without changing pitch/voice.
+            if slot_duration_ms > 0 and len(seg_audio) > 0:
+                factor = len(seg_audio) / slot_duration_ms
+                factor = max(MIN_TEMPO, min(factor, MAX_TEMPO))
+                seg_audio = time_stretch(seg_audio, factor)
         else:
             seg_audio = AudioSegment.silent(duration=slot_duration_ms)
 
