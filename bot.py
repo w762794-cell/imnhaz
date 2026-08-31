@@ -38,11 +38,13 @@ CB_MALE = "voice_male"
 CB_FEMALE = "voice_female"
 CB_AUTO = "voice_auto"
 
-# If a synthesized line is longer than its subtitle slot, speed it up to fit —
-# but never distort it more than this factor.
-MAX_SPEEDUP = 2.5
+# If a synthesized line is longer than its subtitle slot, speed it up a
+# little to help reduce drift — but capped low so the voice doesn't distort
+# into a "chipmunk" sound. Elastic placement (see build_timed_audio) handles
+# the rest of the overrun by queuing, not overlapping.
+MAX_SPEEDUP = 1.5
 # Only bother speeding up if the overrun is meaningfully large.
-SPEEDUP_THRESHOLD = 1.03
+SPEEDUP_THRESHOLD = 1.1
 
 
 def strip_marker(text: str):
@@ -83,18 +85,20 @@ def srt_time_to_ms(srt_time) -> int:
 
 async def build_timed_audio(subs, pick_voice):
     """
-    Synthesize each subtitle line and place it on a timeline anchored to the
-    SRT start times (via overlay), so playback always matches the subtitle
-    timing instead of drifting when a line runs long. Lines longer than their
-    allotted slot (start -> end) are sped up, capped at MAX_SPEEDUP, to fit.
+    Synthesize each subtitle line and place it on a timeline. Each line aims
+    for its own .srt start time, but is never allowed to start before the
+    previous line finishes (elastic placement) — this prevents overlapping,
+    tangled-sounding audio. Lines longer than their allotted slot (start ->
+    end) are also sped up a little, capped at MAX_SPEEDUP, to reduce drift.
 
     pick_voice(forced_voice, line_index) -> voice_name
     Returns (canvas_or_None, success_count, fail_count, last_error).
     """
-    clips = []  # (start_ms, AudioSegment)
+    clips = []  # (position_ms, AudioSegment)
     success_count = 0
     fail_count = 0
     last_error = None
+    cursor_ms = 0
 
     for i, sub in enumerate(subs):
         forced_voice, clean_text = strip_marker(sub.text.replace("\n", " "))
@@ -124,15 +128,22 @@ async def build_timed_audio(subs, pick_voice):
                 except Exception as e:
                     logger.warning("Speedup failed for line %s: %s", i, e)
 
-        clips.append((start_ms, clip))
+        # Elastic placement: aim for this line's own .srt start time, but
+        # never start before the previous line has finished playing — that
+        # would overlap two voices and sound tangled/garbled. If a line runs
+        # long, later lines simply queue right after it and naturally catch
+        # back up to their .srt timestamps once a gap appears.
+        position_ms = max(start_ms, cursor_ms)
+        clips.append((position_ms, clip))
+        cursor_ms = position_ms + len(clip)
 
     if not clips:
         return None, success_count, fail_count, last_error
 
-    total_ms = max(start + len(clip) for start, clip in clips)
+    total_ms = cursor_ms
     canvas = AudioSegment.silent(duration=total_ms)
-    for start, clip in clips:
-        canvas = canvas.overlay(clip, position=start)
+    for position, clip in clips:
+        canvas = canvas.overlay(clip, position=position)
 
     return canvas, success_count, fail_count, last_error
 
