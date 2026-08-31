@@ -10,10 +10,19 @@ Bot នេះទទួលឯកសារ `.srt` ហើយបំប្លែង�
 
 មិនចាំបាច់ចុះឈ្មោះ Azure, Google Cloud ឬដាក់ credit card អ្វីទាំងអស់។
 
-## របៀបកំណត់ភេទសំឡេងក្នុង SRT
+## របៀបប្រើ
 
-លំនាំដើម bot នឹងឆ្លាស់ប្រុស/ស្រីស្វ័យប្រវត្តិតាមលេខបន្ទាត់ subtitle។
-បើចង់កំណត់ច្បាស់លាស់ ដាក់ prefix នៅដើមបន្ទាត់ក្នុងឯកសារ .srt:
+ផ្ញើឯកសារ `.srt` ទៅ bot នឹងបង្ហាញ button ៣ ជម្រើសឲ្យចុច៖
+
+- **👨 ប្រុស (Piseth)** — អានគ្រប់បន្ទាត់ដោយសំឡេងប្រុស
+- **👩 ស្រី (Sreymom)** — អានគ្រប់បន្ទាត់ដោយសំឡេងស្រី
+- **🔀 ឆ្លាស់ស្វ័យប្រវត្តិ** — ឆ្លាស់ប្រុស/ស្រីតាមលេខបន្ទាត់ស្វ័យប្រវត្តិ
+
+## របៀបកំណត់ភេទសំឡេងច្រើនក្នុងឯកសារតែមួយ
+
+បើផ្ញើឯកសារជាមួយ [M]/[F] ស្រាប់ បន្ទាត់ដែលមាន marker នេះនឹងប្រើសំឡេងដែលកំណត់
+ជានិច្ច ទោះបីជាចុច button ប្រុសឬស្រីក៏ដោយ (marker សុទ្ធតែសំខាន់ជាង button)។
+ដាក់ prefix នៅដើមបន្ទាត់ក្នុងឯកសារ .srt:
 
 ```
 1
@@ -31,15 +40,17 @@ Bot នេះទទួលឯកសារ `.srt` ហើយបំប្លែង�
 — បង្កើត bot ជាមួយ [@BotFather](https://t.me/BotFather) ក្នុង Telegram
 ដោយវាយ `/newbot` ហើយចម្លង token ដែលបានមក។ (ធ្វើពីទូរសព្ទបានស្រួល)
 
-## Deploy លើ Render (ឥតគិតថ្លៃ)
+## Deploy លើ Render (ឥតគិតថ្លៃ ១០០%)
 
 1. Push ថតឯកសារនេះទាំងអស់ (`bot.py`, `requirements.txt`, `Dockerfile`, `render.yaml`)
    ទៅ GitHub repository មួយ (អាចធ្វើពី GitHub app លើទូរសព្ទ ឬ github.com)។
 
 2. ចូល [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**,
    ភ្ជាប់ទៅ repository នោះ។ Render នឹងអាន `render.yaml` ហើយបង្កើត
-   **Background Worker** service ស្វ័យប្រវត្តិ ជាមួយ **Free plan**
-   (មិនត្រូវការ web port ព្រោះ bot ប្រើ polling មិនមែន webhook)។
+   **Web Service** ជាមួយ **Free plan** ស្វ័យប្រវត្តិ
+   (Render មិនផ្ដល់ Free plan សម្រាប់ Background Worker ទេ ដូច្នេះ bot នេះប្រើ
+   Web Service ជំនួសវិញ ជាមួយ health-check server តូចមួយក្នុង `bot.py`
+   ដើម្បីបំពេញលក្ខខណ្ឌ "port" របស់ Render — ខាងក្នុងវានៅតែជា Telegram polling ធម្មតា)។
 
 3. ក្នុងផ្ទាំង Environment របស់ service កំណត់តម្លៃ variable មួយគត់៖
    - `TELEGRAM_BOT_TOKEN`
@@ -48,6 +59,22 @@ Bot នេះទទួលឯកសារ `.srt` ហើយបំប្លែង�
    ហើយចាប់ផ្ដើម bot ជាមួយ `python bot.py`។
 
 5. បើក Telegram ស្វែងរក bot របស់អ្នក ផ្ញើ `/start` រួចផ្ញើឯកសារ `.srt` ដើម្បីសាកល្បង។
+
+## កុំឲ្យ bot ដេកលក់ (សំខាន់សម្រាប់ Free plan)
+
+Free Web Service លើ Render **ដេកលក់ស្វ័យប្រវត្តិបន្ទាប់ពី ១៥ នាទីគ្មាន traffic**។
+Bot ខាងក្នុងធ្វើ Telegram polling ដដែល តែ Render មិនដឹងថាមាន traffic ចូល
+ក្រៅពី HTTP request ទេ ដូច្នេះត្រូវការសេវាឥតគិតថ្លៃមួយមកជូត (ping) URL របស់
+service រៀងរាល់ ~ ១០ នាទី៖
+
+1. ចម្លង URL សាធារណៈរបស់ service (មើលនៅផ្នែកខាងលើ Render Dashboard ជា
+   `https://xxxxx.onrender.com`)
+2. ចុះឈ្មោះឥតគិតថ្លៃនៅ [UptimeRobot](https://uptimerobot.com) ឬ
+   [cron-job.org](https://cron-job.org)
+3. បង្កើត monitor/job ថ្មី ដាក់ URL ខាងលើ កំណត់ឲ្យ ping រៀងរាល់ ៥-១០ នាទី
+
+បើមិនធ្វើជំហាននេះទេ bot នៅតែដំណើរការបាន ប៉ុន្តែនឹងឆ្លើយយឺត (30-60 វិនាទី)
+ពេលដំបូងក្រោយពេលមិនប្រើរយៈពេលយូរ ព្រោះ Render ត្រូវពេលដើម្បីភ្ញាក់ឡើងវិញ។
 
 ## ដំណើរការនៅ local (សាកល្បង ជាជម្រើស)
 
@@ -65,7 +92,7 @@ python bot.py
   (community reverse-engineer ពី Edge browser) — ដូច្នេះវាមិនធានាឋិតថេរ 100%
   រយៈពេលវែងទេ បើ Microsoft ប្តូរអ្វីមួយ។ ប៉ុន្តែបច្ចុប្បន្នមានស្ថេរភាពល្អ
   និងត្រូវបានគេប្រើប្រាស់យ៉ាងទូលំទូលាយ។
-- Render free plan នៅសម្រាកបន្ទាប់ពី idle រយៈពេលមួយ ដូច្នេះលើកដំបូងបន្ទាប់ពី
-  idle ការឆ្លើយតបអាចយឺតបន្តិច។
-- បើ subtitle វែងជាងចន្លោះពេលកំណត់ (start-end) សំឡេងអាចលើសពេលដែលកំណត់
-  ក្នុង .srt បន្តិច — bot នេះតម្រៀបតាមចំណុចចាប់ផ្ដើម (start time) មិនកាត់ឬបង្រួមល្បឿនសំឡេងទេ។
+- Render free plan នៅសម្រាកបន្ទាប់ពី idle រយៈពេលមួយ (សូមមើលផ្នែក "កុំឲ្យ bot
+  ដេកលក់" ខាងលើ)។
+- Render free Web Service មិនអនុញ្ញាតឲ្យប្ដូរជា Background Worker ក្រោយ
+  deploy រួចទេ បើចង់ប្ដូរត្រូវលុបហើយបង្កើត service ថ្មី។

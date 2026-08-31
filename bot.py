@@ -2,6 +2,8 @@ import os
 import io
 import logging
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pysrt
 import edge_tts
@@ -245,7 +247,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - bot is running")
+
+    def log_message(self, format, *args):
+        pass  # keep Render logs clean, no per-ping noise
+
+
+def start_health_server():
+    """
+    Render's free plan is a Web Service and requires an open port to consider
+    the deploy healthy. The bot itself only does Telegram polling (no HTTP
+    server needed for that), so this tiny server exists purely to satisfy
+    Render's port check. Use an external uptime pinger (see README) to keep
+    the free instance from spinning down after 15 minutes of no traffic.
+    """
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    server.serve_forever()
+
+
 def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt))
