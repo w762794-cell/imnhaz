@@ -1,10 +1,9 @@
 services:
   - type: web
-    name: khmer-srt-voice-bot
+    name: srt-tts-telegram-bot
     env: docker
-    dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /
     envVars:
-      - key: TELEGRAM_BOT_TOKEN
+      - key: BOT_TOKEN
         sync: false

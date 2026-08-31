@@ -1,295 +1,212 @@
 import os
-import io
+import re
 import logging
 import tempfile
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import asyncio
 
-import pysrt
+import srt
 import edge_tts
 from pydub import AudioSegment
-from pydub.effects import speedup as pydub_speedup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
-    MessageHandler,
     CommandHandler,
+    MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-# httpx logs the full request URL (including the bot token) at INFO level.
-# Silence it so the token never ends up in Render's logs.
-logging.getLogger("httpx").setLevel(logging.WARNING)
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+# Edge-TTS Khmer neural voices
+VOICES = {
+    "male": "km-KH-PisethNeural",
+    "female": "km-KH-SreymomNeural",
+}
 
-# Free Microsoft neural voices (same catalog Edge browser's "Read aloud" uses).
-# No API key or Azure account needed.
-VOICE_MALE = "km-KH-PisethNeural"
-VOICE_FEMALE = "km-KH-SreymomNeural"
+# In-memory map: chat_id -> path of the uploaded .srt file
+user_files: dict[int, str] = {}
 
-# Callback data values for the inline buttons
-CB_MALE = "voice_male"
-CB_FEMALE = "voice_female"
-CB_AUTO = "voice_auto"
-
-# If a synthesized line is longer than its subtitle slot, speed it up a
-# little to help reduce drift — but capped low so the voice doesn't distort
-# into a "chipmunk" sound. Elastic placement (see build_timed_audio) handles
-# the rest of the overrun by queuing, not overlapping.
-MAX_SPEEDUP = 1.5
-# Only bother speeding up if the overrun is meaningfully large.
-SPEEDUP_THRESHOLD = 1.1
+MAX_SPEEDUP = 1.6  # cap how much we speed up audio to fit a slot
 
 
-def strip_marker(text: str):
-    """
-    If a line starts with an explicit marker, return (forced_voice, clean_text).
-    Otherwise return (None, original_text) so the caller's chosen voice applies.
-      [M] / male: / ប្រុស:  -> forces Piseth (male)
-      [F] / female: / ស្រី: -> forces Sreymom (female)
-    """
-    stripped = text.strip()
-    lower = stripped.lower()
+# --------------------------------------------------------------------------
+# Telegram handlers
+# --------------------------------------------------------------------------
 
-    if stripped.startswith("[M]") or lower.startswith("male:") or stripped.startswith("ប្រុស:"):
-        clean = stripped.split(":", 1)[-1].split("]", 1)[-1].strip()
-        return VOICE_MALE, clean
-    if stripped.startswith("[F]") or lower.startswith("female:") or stripped.startswith("ស្រី:"):
-        clean = stripped.split(":", 1)[-1].split("]", 1)[-1].strip()
-        return VOICE_FEMALE, clean
-
-    return None, stripped
-
-
-async def synthesize(text: str, voice_name: str) -> AudioSegment:
-    communicate = edge_tts.Communicate(text, voice_name)
-    audio_bytes = bytearray()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_bytes.extend(chunk["data"])
-    return AudioSegment.from_file(io.BytesIO(bytes(audio_bytes)), format="mp3")
-
-
-def srt_time_to_ms(srt_time) -> int:
-    return (
-        (srt_time.hours * 3600 + srt_time.minutes * 60 + srt_time.seconds) * 1000
-        + srt_time.milliseconds
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "សួស្តី! 👋\n\n"
+        "ខ្ញុំជា Bot បំលែងឯកសារ SRT ទៅជាសំឡេងនិយាយ (Text-to-Speech)។\n\n"
+        "📌 របៀបប្រើ៖\n"
+        "1️⃣ ផ្ញើឯកសារ .srt មកខ្ញុំ\n"
+        "2️⃣ ជ្រើសរើសសំឡេង ប្រុស (Piseth) ឬ ស្រី (Sreymom)\n"
+        "3️⃣ រង់ចាំ ខ្ញុំនឹងផ្ញើឯកសារសំឡេង (.mp3) ត្រឡប់មកវិញ ដែលត្រូវតាមពេលវេលានៃ SRT"
     )
 
 
-async def build_timed_audio(subs, pick_voice):
-    """
-    Synthesize each subtitle line and place it on a timeline. Each line aims
-    for its own .srt start time, but is never allowed to start before the
-    previous line finishes (elastic placement) — this prevents overlapping,
-    tangled-sounding audio. Lines longer than their allotted slot (start ->
-    end) are also sped up a little, capped at MAX_SPEEDUP, to reduce drift.
-
-    pick_voice(forced_voice, line_index) -> voice_name
-    Returns (canvas_or_None, success_count, fail_count, last_error).
-    """
-    clips = []  # (position_ms, AudioSegment)
-    success_count = 0
-    fail_count = 0
-    last_error = None
-    cursor_ms = 0
-
-    for i, sub in enumerate(subs):
-        forced_voice, clean_text = strip_marker(sub.text.replace("\n", " "))
-        if not clean_text:
-            continue
-
-        voice = pick_voice(forced_voice, i)
-        start_ms = srt_time_to_ms(sub.start)
-        end_ms = srt_time_to_ms(sub.end)
-        allotted_ms = max(end_ms - start_ms, 1)
-
-        try:
-            clip = await synthesize(clean_text, voice)
-        except Exception as e:
-            logger.error("TTS failed for line %s (%r): %s", i, clean_text, e)
-            fail_count += 1
-            last_error = e
-            continue
-
-        success_count += 1
-
-        if len(clip) > allotted_ms:
-            ratio = min(len(clip) / allotted_ms, MAX_SPEEDUP)
-            if ratio > SPEEDUP_THRESHOLD:
-                try:
-                    clip = pydub_speedup(clip, playback_speed=ratio)
-                except Exception as e:
-                    logger.warning("Speedup failed for line %s: %s", i, e)
-
-        # Elastic placement: aim for this line's own .srt start time, but
-        # never start before the previous line has finished playing — that
-        # would overlap two voices and sound tangled/garbled. If a line runs
-        # long, later lines simply queue right after it and naturally catch
-        # back up to their .srt timestamps once a gap appears.
-        position_ms = max(start_ms, cursor_ms)
-        clips.append((position_ms, clip))
-        cursor_ms = position_ms + len(clip)
-
-    if not clips:
-        return None, success_count, fail_count, last_error
-
-    total_ms = cursor_ms
-    canvas = AudioSegment.silent(duration=total_ms)
-    for position, clip in clips:
-        canvas = canvas.overlay(clip, position=position)
-
-    return canvas, success_count, fail_count, last_error
-
-
-async def handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-    if not doc or not doc.file_name.lower().endswith(".srt"):
-        await update.message.reply_text("សូមផ្ញើឯកសារ .srt ។")
+    if not doc.file_name.lower().endswith(".srt"):
+        await update.message.reply_text("⚠️ សូមផ្ញើតែឯកសារ .srt ប៉ុណ្ណោះ។")
         return
 
-    tg_file = await doc.get_file()
-    file_bytes = await tg_file.download_as_bytearray()
+    status_msg = await update.message.reply_text("⬇️ កំពុងទាញយកឯកសារ...")
 
-    # Stash the file for this user until they tap a voice button.
-    context.user_data["srt_bytes"] = bytes(file_bytes)
-    context.user_data["srt_filename"] = doc.file_name
+    tmp_dir = tempfile.mkdtemp()
+    srt_path = os.path.join(tmp_dir, doc.file_name)
+
+    tg_file = await doc.get_file()
+    await tg_file.download_to_drive(srt_path)
+
+    user_files[update.effective_chat.id] = srt_path
 
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("👨 ប្រុស (Piseth)", callback_data=CB_MALE),
-                InlineKeyboardButton("👩 ស្រី (Sreymom)", callback_data=CB_FEMALE),
-            ],
-            [InlineKeyboardButton("🔀 ឆ្លាស់ស្វ័យប្រវត្តិ", callback_data=CB_AUTO)],
+                InlineKeyboardButton("👨 ប្រុស (Piseth)", callback_data="male"),
+                InlineKeyboardButton("👩 ស្រី (Sreymom)", callback_data="female"),
+            ]
         ]
     )
-    await update.message.reply_text(
-        "ជ្រើសរើសសំឡេងដែលអ្នកចង់បាន៖", reply_markup=keyboard
-    )
+    await status_msg.edit_text("✅ ទទួលឯកសារបានហើយ។ សូមជ្រើសរើសសំឡេង៖", reply_markup=keyboard)
 
 
 async def handle_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    file_bytes = context.user_data.get("srt_bytes")
-    if not file_bytes:
-        await query.edit_message_text("ឯកសារនេះផុតកំណត់ហើយ សូមផ្ញើ .srt ម្ដងទៀត។")
+    chat_id = query.message.chat_id
+    voice_key = query.data
+    voice_name = VOICES.get(voice_key)
+
+    srt_path = user_files.get(chat_id)
+    if not srt_path or not os.path.exists(srt_path):
+        await query.edit_message_text("⚠️ រកមិនឃើញឯកសារ SRT ទេ សូមផ្ញើម្តងទៀត។")
         return
 
-    choice = query.data
-    if choice == CB_MALE:
-        default_voice = VOICE_MALE
-        label = "សំឡេងប្រុស (Piseth)"
-    elif choice == CB_FEMALE:
-        default_voice = VOICE_FEMALE
-        label = "សំឡេងស្រី (Sreymom)"
-    else:
-        default_voice = None  # alternate automatically per line
-        label = "ឆ្លាស់ស្វ័យប្រវត្តិ"
+    label = "ប្រុស (Piseth)" if voice_key == "male" else "ស្រី (Sreymom)"
+    await query.edit_message_text(f"🎙️ កំពុងបំលែងជាសំឡេង {label}...\nសូមរង់ចាំបន្តិច ⏳")
 
-    def pick_voice(forced_voice, i):
-        if forced_voice:
-            return forced_voice
-        if default_voice:
-            return default_voice
-        return VOICE_MALE if i % 2 == 0 else VOICE_FEMALE
-
-    await query.edit_message_text(f"បានជ្រើសរើស: {label}\nកំពុងដំណើរការ... សូមរង់ចាំបន្តិច។")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        srt_path = os.path.join(tmp, context.user_data.get("srt_filename", "input.srt"))
-        with open(srt_path, "wb") as f:
-            f.write(file_bytes)
-
-        try:
-            subs = pysrt.open(srt_path, encoding="utf-8")
-        except Exception as e:
-            await query.edit_message_text(f"មិនអាចអានឯកសារ SRT បានទេ: {e}")
-            return
-
-        if len(subs) == 0:
-            await query.edit_message_text("ឯកសារ SRT មិនមានខ្លឹមសារទេ។")
-            return
-
-        canvas, success_count, fail_count, last_error = await build_timed_audio(subs, pick_voice)
-
-        if canvas is None:
-            await query.edit_message_text(
-                "សុំទោស! ការបំប្លែងសំឡេងបានបរាជ័យទាំងអស់ "
-                f"({fail_count} បន្ទាត់)។ មូលហេតុ: {last_error}\n\n"
-                "សូមសាកល្បងម្ដងទៀត បើនៅតែបញ្ហា សូមពិនិត្យ Render logs។"
-            )
-            return
-
-        out_path = os.path.join(tmp, "output.mp3")
-        canvas.export(out_path, format="mp3", bitrate="128k")
-
-        status_note = f"បានជោគជ័យ {success_count} បន្ទាត់ (ត្រូវតាមវិនាទីក្នុង .srt)"
-        if fail_count:
-            status_note += f" — បរាជ័យ {fail_count} បន្ទាត់"
-
-        await query.edit_message_text(f"បានជ្រើសរើស: {label}\n{status_note}\nកំពុងផ្ញើសំឡេង...")
-        with open(out_path, "rb") as f:
+    try:
+        output_path = await build_audio_from_srt(srt_path, voice_name)
+        with open(output_path, "rb") as audio_file:
             await context.bot.send_audio(
-                chat_id=query.message.chat_id,
-                audio=f,
-                filename="voice.mp3",
-                title="Khmer SRT Voice",
+                chat_id=chat_id,
+                audio=audio_file,
+                filename="voice_output.mp3",
+                caption=f"✅ បំលែងបានជោគជ័យ! (សំឡេង៖ {label})",
             )
-
-    context.user_data.pop("srt_bytes", None)
-    context.user_data.pop("srt_filename", None)
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "សួស្តី! ផ្ញើឯកសារ .srt មកខ្ញុំ រួចជ្រើសរើសសំឡេងប្រុស (Piseth) ឬស្រី (Sreymom) "
-        "ដោយចុច button ខ្ញុំនឹងបំប្លែងវាទៅជាសំឡេងខ្មែរឲ្យ ត្រូវតាមវិនាទីក្នុង .srt ដោយឥតគិតថ្លៃ។\n\n"
-        "គន្លឹះ: បើចង់ចម្រុះប្រុស/ស្រីក្នុងឯកសារតែមួយ បន្ថែម [M] ឬ [F] នៅដើមបន្ទាត់ "
-        "ក្នុង .srt រួចជ្រើសរើស 🔀 ឆ្លាស់ស្វ័យប្រវត្តិ។"
-    )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Error while building audio")
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ មានបញ្ហា៖ {e}")
+    finally:
+        user_files.pop(chat_id, None)
 
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK - bot is running")
+# --------------------------------------------------------------------------
+# SRT -> timed audio logic
+# --------------------------------------------------------------------------
 
-    def log_message(self, format, *args):
-        pass  # keep Render logs clean, no per-ping noise
+def parse_srt(path: str):
+    with open(path, "r", encoding="utf-8-sig") as f:
+        content = f.read()
+    return list(srt.parse(content))
 
 
-def start_health_server():
-    """
-    Render's free plan is a Web Service and requires an open port to consider
-    the deploy healthy. The bot itself only does Telegram polling (no HTTP
-    server needed for that), so this tiny server exists purely to satisfy
-    Render's port check. Use an external uptime pinger (see README) to keep
-    the free instance from spinning down after 15 minutes of no traffic.
-    """
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
-    server.serve_forever()
+def strip_tags(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", text).strip()
 
+
+def speed_up(seg: AudioSegment, factor: float) -> AudioSegment:
+    """Speed up an AudioSegment by `factor` while keeping the same frame rate,
+    used so long TTS lines still roughly fit inside their subtitle slot."""
+    new_frame_rate = int(seg.frame_rate * factor)
+    sped = seg._spawn(seg.raw_data, overrides={"frame_rate": new_frame_rate})
+    return sped.set_frame_rate(seg.frame_rate)
+
+
+async def tts_to_file(text: str, voice: str, out_path: str):
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(out_path)
+
+
+async def build_audio_from_srt(srt_path: str, voice: str) -> str:
+    subs = parse_srt(srt_path)
+    tmp_dir = tempfile.mkdtemp()
+
+    timeline = AudioSegment.silent(duration=0)
+    current_ms = 0
+
+    for i, sub in enumerate(subs):
+        start_ms = int(sub.start.total_seconds() * 1000)
+        end_ms = int(sub.end.total_seconds() * 1000)
+        slot_duration_ms = max(end_ms - start_ms, 200)
+
+        # Insert silence so this line starts exactly at its SRT timestamp
+        if start_ms > current_ms:
+            timeline += AudioSegment.silent(duration=start_ms - current_ms)
+            current_ms = start_ms
+        elif start_ms < current_ms:
+            # Previous line overran into this one's start time; just continue,
+            # we cannot move time backwards.
+            pass
+
+        clean_text = strip_tags(sub.content)
+
+        if clean_text:
+            seg_path = os.path.join(tmp_dir, f"seg_{i}.mp3")
+            await tts_to_file(clean_text, voice, seg_path)
+            seg_audio = AudioSegment.from_file(seg_path)
+
+            # If the generated speech is longer than its subtitle slot,
+            # speed it up a bit so timing stays close to the SRT.
+            if len(seg_audio) > slot_duration_ms > 0:
+                factor = min(len(seg_audio) / slot_duration_ms, MAX_SPEEDUP)
+                seg_audio = speed_up(seg_audio, factor)
+        else:
+            seg_audio = AudioSegment.silent(duration=slot_duration_ms)
+
+        timeline += seg_audio
+        current_ms += len(seg_audio)
+
+    output_path = os.path.join(tmp_dir, "output.mp3")
+    timeline.export(output_path, format="mp3", bitrate="192k")
+    return output_path
+
+
+# --------------------------------------------------------------------------
+# App entrypoint (webhook on Render, polling locally)
+# --------------------------------------------------------------------------
 
 def main():
-    threading.Thread(target=start_health_server, daemon=True).start()
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("srt"), handle_srt))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(handle_voice_choice))
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+    port = int(os.environ.get("PORT", 8080))
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")  # auto-set by Render
+
+    if render_url:
+        logger.info("Starting in WEBHOOK mode on %s", render_url)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=BOT_TOKEN,
+            webhook_url=f"{render_url}/{BOT_TOKEN}",
+        )
+    else:
+        logger.info("Starting in POLLING mode (local dev)")
+        app.run_polling()
 
 
 if __name__ == "__main__":

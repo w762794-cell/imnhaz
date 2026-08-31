@@ -1,98 +1,93 @@
-# Khmer SRT → Voice Telegram Bot (ឥតគិតថ្លៃ)
+# SRT → Voice Telegram Bot (ភាសាខ្មែរ)
 
-Bot នេះទទួលឯកសារ `.srt` ហើយបំប្លែងទៅជាឯកសារសំឡេង MP3 ជាភាសាខ្មែរ
-ដោយប្រើ **edge-tts** — library ដែលទាញយកសំឡេងពី Microsoft Edge browser
-(feature "Read aloud") ដោយ**ឥតគិតថ្លៃ និងមិនត្រូវការ API key ឬគណនី Azure ទេ**។
-វាប្រើ voice neural ដូចគ្នាបេះបិទនឹង Azure:
+Bot Telegram ដែលបំលែងឯកសារ `.srt` ទៅជាឯកសារសំឡេង `.mp3` ដោយប្រើសំឡេង Neural
+ភាសាខ្មែរគុណភាពខ្ពស់ (ឥតគិតថ្លៃ) តាមរយៈ **edge-tts**:
 
-- **km-KH-PisethNeural** — សំឡេងប្រុស
-- **km-KH-SreymomNeural** — សំឡេងស្រី
+- 👨 **Piseth** — សំឡេងប្រុស (`km-KH-PisethNeural`)
+- 👩 **Sreymom** — សំឡេងស្រី (`km-KH-SreymomNeural`)
 
-មិនចាំបាច់ចុះឈ្មោះ Azure, Google Cloud ឬដាក់ credit card អ្វីទាំងអស់។
+សំឡេងចេញមកនឹងចាប់ផ្តើម/បញ្ចប់ត្រូវតាមពេលវេលា (timestamp) នៃឯកសារ SRT
+(បើបន្ទាត់ណាមួយនិយាយវែងជាងចន្លោះពេលកំណត់ ខ្លួន Bot នឹងបង្រួញល្បឿននិយាយបន្តិច
+ដើម្បីរក្សាពេលវេលាឲ្យជិតទៅតាម SRT ដដែល)។
 
-## របៀបប្រើ
-
-ផ្ញើឯកសារ `.srt` ទៅ bot នឹងបង្ហាញ button ៣ ជម្រើសឲ្យចុច៖
-
-- **👨 ប្រុស (Piseth)** — អានគ្រប់បន្ទាត់ដោយសំឡេងប្រុស
-- **👩 ស្រី (Sreymom)** — អានគ្រប់បន្ទាត់ដោយសំឡេងស្រី
-- **🔀 ឆ្លាស់ស្វ័យប្រវត្តិ** — ឆ្លាស់ប្រុស/ស្រីតាមលេខបន្ទាត់ស្វ័យប្រវត្តិ
-
-## របៀបកំណត់ភេទសំឡេងច្រើនក្នុងឯកសារតែមួយ
-
-បើផ្ញើឯកសារជាមួយ [M]/[F] ស្រាប់ បន្ទាត់ដែលមាន marker នេះនឹងប្រើសំឡេងដែលកំណត់
-ជានិច្ច ទោះបីជាចុច button ប្រុសឬស្រីក៏ដោយ (marker សុទ្ធតែសំខាន់ជាង button)។
-ដាក់ prefix នៅដើមបន្ទាត់ក្នុងឯកសារ .srt:
+## រចនាសម្ព័ន្ធឯកសារ
 
 ```
-1
-00:00:01,000 --> 00:00:03,000
-[M] សួស្តី តើអ្នកសុខសប្បាយទេ?
-
-2
-00:00:03,500 --> 00:00:06,000
-[F] ខ្ញុំសុខសប្បាយ អរគុណ!
+srt-tts-bot/
+├── bot.py            # កូដសំខាន់របស់ bot
+├── requirements.txt  # library ដែលត្រូវការ
+├── Dockerfile        # សម្រាប់ deploy (មាន ffmpeg)
+├── render.yaml        # config សម្រាប់ deploy លើ Render
+└── README.md
 ```
 
-## អ្វីដែលត្រូវការមុនចាប់ផ្ដើម
+## ១. រៀបចំ Telegram Bot
 
-មានតែមួយយ៉ាងគត់៖ **Telegram Bot Token**
-— បង្កើត bot ជាមួយ [@BotFather](https://t.me/BotFather) ក្នុង Telegram
-ដោយវាយ `/newbot` ហើយចម្លង token ដែលបានមក។ (ធ្វើពីទូរសព្ទបានស្រួល)
+1. ចាក់សារទៅ [@BotFather](https://t.me/BotFather) លើ Telegram
+2. វាយ `/newbot` រួចធ្វើតាមការណែនាំ
+3. ចម្លង **Bot Token** ដែលបានមក (ឧទាហរណ៍ `123456:ABC-...`)
 
-## Deploy លើ Render (ឥតគិតថ្លៃ ១០០%)
+## ២. សាកល្បងលើម៉ាស៊ីនផ្ទាល់ខ្លួន (Local)
 
-1. Push ថតឯកសារនេះទាំងអស់ (`bot.py`, `requirements.txt`, `Dockerfile`, `render.yaml`)
-   ទៅ GitHub repository មួយ (អាចធ្វើពី GitHub app លើទូរសព្ទ ឬ github.com)។
-
-2. ចូល [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**,
-   ភ្ជាប់ទៅ repository នោះ។ Render នឹងអាន `render.yaml` ហើយបង្កើត
-   **Web Service** ជាមួយ **Free plan** ស្វ័យប្រវត្តិ
-   (Render មិនផ្ដល់ Free plan សម្រាប់ Background Worker ទេ ដូច្នេះ bot នេះប្រើ
-   Web Service ជំនួសវិញ ជាមួយ health-check server តូចមួយក្នុង `bot.py`
-   ដើម្បីបំពេញលក្ខខណ្ឌ "port" របស់ Render — ខាងក្នុងវានៅតែជា Telegram polling ធម្មតា)។
-
-3. ក្នុងផ្ទាំង Environment របស់ service កំណត់តម្លៃ variable មួយគត់៖
-   - `TELEGRAM_BOT_TOKEN`
-
-4. ចុច **Deploy**។ Render នឹង build Docker image (ដំឡើង ffmpeg ស្វ័យប្រវត្តិ)
-   ហើយចាប់ផ្ដើម bot ជាមួយ `python bot.py`។
-
-5. បើក Telegram ស្វែងរក bot របស់អ្នក ផ្ញើ `/start` រួចផ្ញើឯកសារ `.srt` ដើម្បីសាកល្បង។
-
-## កុំឲ្យ bot ដេកលក់ (សំខាន់សម្រាប់ Free plan)
-
-Free Web Service លើ Render **ដេកលក់ស្វ័យប្រវត្តិបន្ទាប់ពី ១៥ នាទីគ្មាន traffic**។
-Bot ខាងក្នុងធ្វើ Telegram polling ដដែល តែ Render មិនដឹងថាមាន traffic ចូល
-ក្រៅពី HTTP request ទេ ដូច្នេះត្រូវការសេវាឥតគិតថ្លៃមួយមកជូត (ping) URL របស់
-service រៀងរាល់ ~ ១០ នាទី៖
-
-1. ចម្លង URL សាធារណៈរបស់ service (មើលនៅផ្នែកខាងលើ Render Dashboard ជា
-   `https://xxxxx.onrender.com`)
-2. ចុះឈ្មោះឥតគិតថ្លៃនៅ [UptimeRobot](https://uptimerobot.com) ឬ
-   [cron-job.org](https://cron-job.org)
-3. បង្កើត monitor/job ថ្មី ដាក់ URL ខាងលើ កំណត់ឲ្យ ping រៀងរាល់ ៥-១០ នាទី
-
-បើមិនធ្វើជំហាននេះទេ bot នៅតែដំណើរការបាន ប៉ុន្តែនឹងឆ្លើយយឺត (30-60 វិនាទី)
-ពេលដំបូងក្រោយពេលមិនប្រើរយៈពេលយូរ ព្រោះ Render ត្រូវពេលដើម្បីភ្ញាក់ឡើងវិញ។
-
-## ដំណើរការនៅ local (សាកល្បង ជាជម្រើស)
+ត្រូវការ Python 3.11+ និង `ffmpeg` ដំឡើងក្នុងម៉ាស៊ីន:
 
 ```bash
-pip install -r requirements.txt
-# ffmpeg ត្រូវតែដំឡើងក្នុងម៉ាស៊ីនផងដែរ (apt install ffmpeg / brew install ffmpeg)
+# ដំឡើង ffmpeg (Ubuntu/Debian)
+sudo apt-get install ffmpeg
 
-export TELEGRAM_BOT_TOKEN="xxxx"
+# ដំឡើង library
+pip install -r requirements.txt
+
+# កំណត់ token
+export BOT_TOKEN="ដាក់_token_របស់អ្នក_នៅទីនេះ"
+
+# run
 python bot.py
 ```
 
-## កំណត់ចំណាំ
+បើ run ជោគជ័យ Bot នឹងចាប់ផ្តើមក្នុងរបៀប polling ដោយស្វ័យប្រវត្តិ
+(ព្រោះមិនមាន `RENDER_EXTERNAL_URL`)។
 
-- edge-tts ជា service ដែល Microsoft មិនបានចេញផ្សាយជា public API ផ្លូវការទេ
-  (community reverse-engineer ពី Edge browser) — ដូច្នេះវាមិនធានាឋិតថេរ 100%
-  រយៈពេលវែងទេ បើ Microsoft ប្តូរអ្វីមួយ។ ប៉ុន្តែបច្ចុប្បន្នមានស្ថេរភាពល្អ
-  និងត្រូវបានគេប្រើប្រាស់យ៉ាងទូលំទូលាយ។
-- Render free plan នៅសម្រាកបន្ទាប់ពី idle រយៈពេលមួយ (សូមមើលផ្នែក "កុំឲ្យ bot
-  ដេកលក់" ខាងលើ)។
-- Render free Web Service មិនអនុញ្ញាតឲ្យប្ដូរជា Background Worker ក្រោយ
-  deploy រួចទេ បើចង់ប្ដូរត្រូវលុបហើយបង្កើត service ថ្មី។
+## ៣. Deploy លើ Render (Free Tier)
+
+### របៀបទី១៖ ប្រើ Blueprint (ងាយបំផុត)
+
+1. Upload code នេះទៅ GitHub repository ថ្មីមួយ
+2. ចូល [Render Dashboard](https://dashboard.render.com/) → **New** → **Blueprint**
+3. ភ្ជាប់ទៅ repository របស់អ្នក (Render នឹងអាន `render.yaml` ដោយស្វ័យប្រវត្តិ)
+4. នៅពេលសួររក environment variable `BOT_TOKEN` សូមបំពេញ token ពី BotFather
+5. ចុច **Apply** — Render នឹង build image ពី `Dockerfile` ហើយ deploy ជា Web Service
+
+### របៀបទី២៖ បង្កើត Web Service ដោយដៃ
+
+1. Push code ទៅ GitHub
+2. Render Dashboard → **New** → **Web Service**
+3. ជ្រើសរើស repository → Environment ជ្រើសរើស **Docker**
+4. Plan ជ្រើសរើស **Free**
+5. Environment Variables → បន្ថែម `BOT_TOKEN` = token របស់អ្នក
+6. ចុច **Create Web Service**
+
+Render នឹងផ្តល់ URL ជូនស្វ័យប្រវត្តិ (`RENDER_EXTERNAL_URL`) ដែល `bot.py`
+ប្រើដើម្បីចុះឈ្មោះ webhook ដោយស្វ័យប្រវត្តិ — មិនចាំបាច់កំណត់អ្វីបន្ថែមទេ។
+
+### ចំណាំសំខាន់អំពី Render Free Tier
+
+- សេវា Free នឹង **ដេកលក់ (sleep)** បន្ទាប់ពីគ្មានចរាចរណ៍ ~15 នាទី ហើយនឹងចំណាយពេល
+  ប្រហែល 30-60 វិនាទីដើម្បីភ្ញាក់ឡើងវិញនៅពេលមានសារចូលថ្មី។
+- ដើម្បីជៀសវាងបញ្ហានេះ អ្នកអាចប្រើសេវា ping (ដូចជា UptimeRobot) ឲ្យចូលមើល
+  URL របស់ Bot រៀងរាល់ ១០ នាទីម្តង ដើម្បីរក្សា Bot ឲ្យភ្ញាក់ជានិច្ច។
+
+## ៤. របៀបប្រើប្រាស់ Bot
+
+1. ស្វែងរក Bot របស់អ្នកលើ Telegram រួច `/start`
+2. ផ្ញើឯកសារ `.srt`
+3. ចុចជ្រើសរើសសំឡេង **ប្រុស (Piseth)** ឬ **ស្រី (Sreymom)**
+4. រង់ចាំ Bot ដំណើរការ (រយៈពេលអាស្រ័យលើប្រវែងឯកសារ) រួច Bot នឹងផ្ញើឯកសារ
+   `.mp3` ត្រឡប់មកវិញ
+
+## ចំណុចអាចកែលម្អបន្ថែម (ស្រេចចិត្ត)
+
+- បន្ថែម progress update រៀងរាល់ N បន្ទាត់ សម្រាប់ឯកសារវែងៗ
+- បន្ថែមជម្រើសបញ្ចេញជា `.wav` ជំនួស `.mp3`
+- ដាក់ queue/database សម្រាប់អ្នកប្រើច្រើននាក់ក្នុងពេលតែមួយ
+- ប្រើ Redis/Postgres ជំនួស dict ក្នុងសតិ (`user_files`) បើចង់ scale ធំ
