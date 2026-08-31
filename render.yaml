@@ -1,14 +1,9 @@
-# render.yaml — Render "Blueprint" ដែលអនុញ្ញាតឲ្យកំណត់ service ដោយស្វ័យប្រវត្តិ
-# នៅពេល import repo ចូល Render, វានឹងអាន file នេះ ហើយស្នើរបង្កើត service ជូនដោយស្វ័យប្រវត្តិ
-# (អ្នកនៅតែអាចបង្កើត service ដោយដៃតាមរយៈ Dashboard ក៏បាន បើមិនចង់ប្រើ blueprint នេះ)
-
 services:
-  - type: web
-    name: telegram-srt-bot
-    runtime: docker
+  - type: worker
+    name: khmer-srt-voice-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
     plan: free
     envVars:
-      - key: BOT_TOKEN
-        sync: false   # ត្រូវបញ្ចូលដោយដៃនៅក្នុង Render Dashboard (កុំដាក់ token ក្នុង repo)
-      - key: WHISPER_MODEL_SIZE
-        value: small
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false

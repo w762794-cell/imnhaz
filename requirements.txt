@@ -1,7 +1,4 @@
-python-telegram-
-bot[webhooks]==21.4
-edge-tts==6.1.12
+python-telegram-bot==21.6
+pysrt==1.1.2
 pydub==0.25.1
-srt==3.5.3
-faster-whisper==1.0.3
-deep-translator==1.11.4
+edge-tts==6.1.19
