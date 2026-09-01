@@ -38,6 +38,11 @@ user_files: dict[int, str] = {}
 MAX_TEMPO = 2.2   # cap on how much we may speed up speech to fit a slot
 MIN_TEMPO = 0.75  # cap on how much we may slow speech down to fill a slot
 
+TTS_MAX_ATTEMPTS = 4          # retries if edge-tts drops/truncates audio
+TTS_RETRY_DELAY_SEC = 1.2     # pause before retrying a failed/short segment
+TTS_INTER_REQUEST_DELAY_SEC = 0.25  # small pause between consecutive lines
+MIN_MS_PER_WORD = 120         # rough floor used to detect truncated audio
+
 
 # --------------------------------------------------------------------------
 # Telegram handlers
@@ -98,13 +103,27 @@ async def handle_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(f"🎙️ កំពុងបំលែងជាសំឡេង {label}...\nសូមរង់ចាំបន្តិច ⏳")
 
     try:
-        output_path = await build_audio_from_srt(srt_path, voice_name)
+        output_path, failed_lines = await build_audio_from_srt(srt_path, voice_name)
         with open(output_path, "rb") as audio_file:
             await context.bot.send_audio(
                 chat_id=chat_id,
                 audio=audio_file,
                 filename="voice_output.mp3",
                 caption=f"✅ បំលែងបានជោគជ័យ! (សំឡេង៖ {label})",
+            )
+
+        if failed_lines:
+            lines_text = "\n".join(
+                f"• បន្ទាត់ #{n} ({ts}): {preview}..."
+                for n, ts, preview in failed_lines[:20]
+            )
+            more = f"\n... និងច្រើនទៀត ({len(failed_lines) - 20})" if len(failed_lines) > 20 else ""
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"⚠️ បន្ទាត់ចំនួន {len(failed_lines)} មិនអាចបំលែងជាសំឡេងបានទេ "
+                    f"(ដាក់ជាស្ងាត់ជំនួសវិញ)៖\n{lines_text}{more}"
+                ),
             )
     except Exception as e:  # noqa: BLE001
         logger.exception("Error while building audio")
@@ -120,11 +139,29 @@ async def handle_voice_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
 def parse_srt(path: str):
     with open(path, "r", encoding="utf-8-sig") as f:
         content = f.read()
-    return list(srt.parse(content))
+    # ignore_errors=True skips a malformed block instead of aborting parsing
+    # (or silently dropping) every subtitle that comes after it -- common
+    # with machine-translated .srt files that have small formatting quirks.
+    subs = list(srt.parse(content, ignore_errors=True))
+    logger.info("Parsed %d subtitle entries from %s", len(subs), path)
+    return subs
 
 
 def strip_tags(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text).strip()
+    # Only remove well-known subtitle formatting tags (italic/bold/underline/
+    # font/color), instead of a generic "<...>" pattern -- a generic pattern
+    # will eat every character (including whole lines of real dialogue)
+    # between a stray, unclosed "<" and the next ">" anywhere later in the
+    # text, which is common in machine-translated .srt files.
+    text = re.sub(r"</?\s*(i|b|u|font)[^>]*>", "", text, flags=re.IGNORECASE)
+    # Also strip ASS/SSA-style override tags, e.g. {\an8}, {\i1}
+    text = re.sub(r"\{\\[^}]*\}", "", text)
+    # Multi-line subtitle blocks (two speakers, wrapped lines, etc.) should
+    # read as one continuous phrase -- a raw newline sent to edge-tts can
+    # sometimes cause it to only speak part of the text.
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 def _atempo_chain(factor: float) -> str:
@@ -166,11 +203,45 @@ def time_stretch(seg: AudioSegment, factor: float) -> AudioSegment:
 
 
 async def tts_to_file(text: str, voice: str, out_path: str):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(out_path)
+    """Synthesize `text` to `out_path`, retrying if edge-tts drops the
+    connection or returns audio that looks truncated (too short for the
+    amount of text given)."""
+    word_count = max(len(text.split()), 1)
+    expected_min_ms = word_count * MIN_MS_PER_WORD
+
+    last_err = None
+    for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
+        try:
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(out_path)
+
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                duration_ms = len(AudioSegment.from_file(out_path))
+                # Audio noticeably shorter than expected usually means
+                # edge-tts cut off partway through -- treat as a failure
+                # and retry rather than silently keeping the clipped line.
+                if duration_ms >= expected_min_ms * 0.5:
+                    return
+                last_err = RuntimeError(
+                    f"suspiciously short audio ({duration_ms}ms for "
+                    f"{word_count} words, expected >= {expected_min_ms * 0.5:.0f}ms)"
+                )
+            else:
+                last_err = RuntimeError("edge-tts returned an empty file")
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+
+        logger.warning(
+            "TTS attempt %d/%d failed for %r: %s",
+            attempt, TTS_MAX_ATTEMPTS, text[:60], last_err,
+        )
+        if attempt < TTS_MAX_ATTEMPTS:
+            await asyncio.sleep(TTS_RETRY_DELAY_SEC)
+
+    raise RuntimeError(f"TTS failed after {TTS_MAX_ATTEMPTS} attempts: {last_err}")
 
 
-async def build_audio_from_srt(srt_path: str, voice: str) -> str:
+async def build_audio_from_srt(srt_path: str, voice: str):
     subs = parse_srt(srt_path)
     tmp_dir = tempfile.mkdtemp()
 
@@ -179,6 +250,7 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
     # timeline yet.
     segments = []  # list of (start_ms, AudioSegment)
     total_duration_ms = 0
+    failed_lines = []  # (line_number, start_timestamp, text_preview)
 
     for i, sub in enumerate(subs):
         start_ms = int(sub.start.total_seconds() * 1000)
@@ -189,15 +261,30 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
 
         if clean_text:
             seg_path = os.path.join(tmp_dir, f"seg_{i}.mp3")
-            await tts_to_file(clean_text, voice, seg_path)
-            seg_audio = AudioSegment.from_file(seg_path)
+            try:
+                await tts_to_file(clean_text, voice, seg_path)
+                seg_audio = AudioSegment.from_file(seg_path)
 
-            # Nudge speech tempo so its duration lines up with its subtitle
-            # slot as closely as possible, without changing pitch/voice.
-            if slot_duration_ms > 0 and len(seg_audio) > 0:
-                factor = len(seg_audio) / slot_duration_ms
-                factor = max(MIN_TEMPO, min(factor, MAX_TEMPO))
-                seg_audio = time_stretch(seg_audio, factor)
+                # Nudge speech tempo so its duration lines up with its
+                # subtitle slot as closely as possible, without changing
+                # pitch/voice.
+                if slot_duration_ms > 0 and len(seg_audio) > 0:
+                    factor = len(seg_audio) / slot_duration_ms
+                    factor = max(MIN_TEMPO, min(factor, MAX_TEMPO))
+                    seg_audio = time_stretch(seg_audio, factor)
+            except Exception as e:  # noqa: BLE001
+                # One line's TTS permanently failing (after all retries)
+                # should not throw away every other line in the file --
+                # fall back to silence for this slot and keep going, but
+                # remember it so we can tell the user exactly which line
+                # was skipped.
+                logger.error("Giving up on line %d (%r): %s", i + 1, clean_text[:60], e)
+                failed_lines.append((i + 1, str(sub.start), clean_text[:60]))
+                seg_audio = AudioSegment.silent(duration=slot_duration_ms)
+
+            # Small pause between requests -- helps avoid the TTS service
+            # rate-limiting/dropping back-to-back connections on long files.
+            await asyncio.sleep(TTS_INTER_REQUEST_DELAY_SEC)
         else:
             seg_audio = AudioSegment.silent(duration=slot_duration_ms)
 
@@ -215,7 +302,8 @@ async def build_audio_from_srt(srt_path: str, voice: str) -> str:
 
     output_path = os.path.join(tmp_dir, "output.mp3")
     timeline.export(output_path, format="mp3", bitrate="192k")
-    return output_path
+    return output_path, failed_lines
+
 
 
 
