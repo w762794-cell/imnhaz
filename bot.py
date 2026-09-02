@@ -35,8 +35,8 @@ VOICES = {
 # In-memory map: chat_id -> path of the uploaded .srt file
 user_files: dict[int, str] = {}
 
-MAX_TEMPO = 2.2   # cap on how much we may speed up speech to fit a slot
-MIN_TEMPO = 0.75  # cap on how much we may slow speech down to fill a slot
+MAX_TEMPO = 1.15  # keep speech pace close to natural -- only mild speed-up
+MIN_TEMPO = 0.90  # keep speech pace close to natural -- only mild slow-down
 
 TTS_MAX_ATTEMPTS = 4          # retries if edge-tts drops/truncates audio
 TTS_RETRY_DELAY_SEC = 1.2     # pause before retrying a failed/short segment
