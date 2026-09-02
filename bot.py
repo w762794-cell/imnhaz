@@ -35,8 +35,8 @@ VOICES = {
 # In-memory map: chat_id -> path of the uploaded .srt file
 user_files: dict[int, str] = {}
 
-MAX_TEMPO = 1.15  # keep speech pace close to natural -- only mild speed-up
-MIN_TEMPO = 0.90  # keep speech pace close to natural -- only mild slow-down
+MAX_TEMPO = 1.35  # cap on speed-up, applied only when a line would actually
+                   # run into the next line's start (keeps pace natural)
 
 TTS_MAX_ATTEMPTS = 4          # retries if edge-tts drops/truncates audio
 TTS_RETRY_DELAY_SEC = 1.2     # pause before retrying a failed/short segment
@@ -245,11 +245,9 @@ async def build_audio_from_srt(srt_path: str, voice: str):
     subs = parse_srt(srt_path)
     tmp_dir = tempfile.mkdtemp()
 
-    # First pass: generate (and tempo-fit) every line's audio, and remember
-    # the exact SRT start time it belongs at. We don't place anything on a
-    # timeline yet.
-    segments = []  # list of (start_ms, AudioSegment)
-    total_duration_ms = 0
+    # Pass 1: generate every line's raw audio (no tempo changes yet) and
+    # remember its exact SRT start/end time.
+    raw_items = []  # dicts: start_ms, end_ms, audio
     failed_lines = []  # (line_number, start_timestamp, text_preview)
 
     for i, sub in enumerate(subs):
@@ -264,14 +262,6 @@ async def build_audio_from_srt(srt_path: str, voice: str):
             try:
                 await tts_to_file(clean_text, voice, seg_path)
                 seg_audio = AudioSegment.from_file(seg_path)
-
-                # Nudge speech tempo so its duration lines up with its
-                # subtitle slot as closely as possible, without changing
-                # pitch/voice.
-                if slot_duration_ms > 0 and len(seg_audio) > 0:
-                    factor = len(seg_audio) / slot_duration_ms
-                    factor = max(MIN_TEMPO, min(factor, MAX_TEMPO))
-                    seg_audio = time_stretch(seg_audio, factor)
             except Exception as e:  # noqa: BLE001
                 # One line's TTS permanently failing (after all retries)
                 # should not throw away every other line in the file --
@@ -288,10 +278,37 @@ async def build_audio_from_srt(srt_path: str, voice: str):
         else:
             seg_audio = AudioSegment.silent(duration=slot_duration_ms)
 
-        segments.append((start_ms, seg_audio))
-        total_duration_ms = max(total_duration_ms, start_ms + len(seg_audio), end_ms)
+        raw_items.append({"start_ms": start_ms, "end_ms": end_ms, "audio": seg_audio})
 
-    # Second pass: build a silent canvas spanning the whole file and overlay
+    # Pass 2: only compress a line if it would otherwise actually overlap
+    # the NEXT line's start -- not just because it runs past its own
+    # nominal end time. Subtitles usually have a small natural gap before
+    # the next line begins, so most overruns fit there for free with zero
+    # tempo change, which keeps the speaking pace sounding natural and
+    # consistent (only genuinely tight lines get nudged, and only by as
+    # little as needed).
+    segments = []  # (start_ms, AudioSegment)
+    total_duration_ms = 0
+
+    for i, item in enumerate(raw_items):
+        start_ms = item["start_ms"]
+        seg_audio = item["audio"]
+
+        if i + 1 < len(raw_items):
+            available_ms = raw_items[i + 1]["start_ms"] - start_ms
+        else:
+            available_ms = None  # last line -- nothing after it to bump into
+
+        if available_ms and available_ms > 0 and len(seg_audio) > available_ms:
+            factor = len(seg_audio) / available_ms
+            factor = min(factor, MAX_TEMPO)  # keep pace natural; small overlap
+            seg_audio = time_stretch(seg_audio, factor)  # is preferable to
+            # sounding rushed if it still doesn't quite fit after this cap.
+
+        segments.append((start_ms, seg_audio))
+        total_duration_ms = max(total_duration_ms, start_ms + len(seg_audio), item["end_ms"])
+
+    # Pass 3: build a silent canvas spanning the whole file and overlay
     # each line at its exact SRT start time. Placing lines by absolute
     # position (instead of concatenating them one after another) means a
     # line that runs slightly long can never push every later line out of
