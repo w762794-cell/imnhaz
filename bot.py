@@ -35,10 +35,8 @@ VOICES = {
 # In-memory map: chat_id -> path of the uploaded .srt file
 user_files: dict[int, str] = {}
 
-MAX_RATE_BOOST_PCT = 35  # cap on how much faster we ask the TTS engine itself
-                          # to speak (native, natural-sounding), applied only
-                          # when a line would actually run into the next
-                          # line's start
+MAX_TEMPO = 1.15  # keep speech pace close to natural -- only mild speed-up
+MIN_TEMPO = 0.90  # keep speech pace close to natural -- only mild slow-down
 
 TTS_MAX_ATTEMPTS = 4          # retries if edge-tts drops/truncates audio
 TTS_RETRY_DELAY_SEC = 1.2     # pause before retrying a failed/short segment
@@ -204,19 +202,17 @@ def time_stretch(seg: AudioSegment, factor: float) -> AudioSegment:
     return AudioSegment.from_file(out_path, format="wav")
 
 
-async def tts_to_file(text: str, voice: str, out_path: str, rate: str = "+0%"):
+async def tts_to_file(text: str, voice: str, out_path: str):
     """Synthesize `text` to `out_path`, retrying if edge-tts drops the
     connection or returns audio that looks truncated (too short for the
-    amount of text given). `rate` (e.g. "+20%") asks the TTS engine to
-    natively speak faster/slower, which sounds far more natural than
-    mechanically time-stretching the audio afterward."""
+    amount of text given)."""
     word_count = max(len(text.split()), 1)
     expected_min_ms = word_count * MIN_MS_PER_WORD
 
     last_err = None
     for attempt in range(1, TTS_MAX_ATTEMPTS + 1):
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            communicate = edge_tts.Communicate(text, voice)
             await communicate.save(out_path)
 
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -249,9 +245,11 @@ async def build_audio_from_srt(srt_path: str, voice: str):
     subs = parse_srt(srt_path)
     tmp_dir = tempfile.mkdtemp()
 
-    # Pass 1: generate every line's raw audio (no tempo changes yet) and
-    # remember its exact SRT start/end time.
-    raw_items = []  # dicts: start_ms, end_ms, audio
+    # First pass: generate (and tempo-fit) every line's audio, and remember
+    # the exact SRT start time it belongs at. We don't place anything on a
+    # timeline yet.
+    segments = []  # list of (start_ms, AudioSegment)
+    total_duration_ms = 0
     failed_lines = []  # (line_number, start_timestamp, text_preview)
 
     for i, sub in enumerate(subs):
@@ -266,6 +264,14 @@ async def build_audio_from_srt(srt_path: str, voice: str):
             try:
                 await tts_to_file(clean_text, voice, seg_path)
                 seg_audio = AudioSegment.from_file(seg_path)
+
+                # Nudge speech tempo so its duration lines up with its
+                # subtitle slot as closely as possible, without changing
+                # pitch/voice.
+                if slot_duration_ms > 0 and len(seg_audio) > 0:
+                    factor = len(seg_audio) / slot_duration_ms
+                    factor = max(MIN_TEMPO, min(factor, MAX_TEMPO))
+                    seg_audio = time_stretch(seg_audio, factor)
             except Exception as e:  # noqa: BLE001
                 # One line's TTS permanently failing (after all retries)
                 # should not throw away every other line in the file --
@@ -282,55 +288,10 @@ async def build_audio_from_srt(srt_path: str, voice: str):
         else:
             seg_audio = AudioSegment.silent(duration=slot_duration_ms)
 
-        raw_items.append({
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "audio": seg_audio,
-            "text": clean_text,
-        })
-
-    # Pass 2: only speed up a line if it would otherwise actually overlap
-    # the NEXT line's start -- not just because it runs past its own
-    # nominal end time. Subtitles usually have a small natural gap before
-    # the next line begins, so most overruns fit there for free with zero
-    # change, keeping the speaking pace natural and consistent. When a line
-    # genuinely needs to be faster, we ask edge-tts to *natively* speak it
-    # faster (rate=+N%) instead of mechanically time-stretching the
-    # recording -- this sounds like a person speaking briskly rather than a
-    # sped-up tape, which is what makes tools like Voicertool sound natural.
-    segments = []  # (start_ms, AudioSegment)
-    total_duration_ms = 0
-
-    for i, item in enumerate(raw_items):
-        start_ms = item["start_ms"]
-        seg_audio = item["audio"]
-
-        if i + 1 < len(raw_items):
-            available_ms = raw_items[i + 1]["start_ms"] - start_ms
-        else:
-            available_ms = None  # last line -- nothing after it to bump into
-
-        if available_ms and available_ms > 0 and len(seg_audio) > available_ms and item["text"]:
-            factor = len(seg_audio) / available_ms
-            pct = min(int(round((factor - 1.0) * 100)), MAX_RATE_BOOST_PCT)
-
-            if pct > 0:
-                try:
-                    fast_path = os.path.join(tmp_dir, f"seg_{i}_fast.mp3")
-                    await tts_to_file(item["text"], voice, fast_path, rate=f"+{pct}%")
-                    seg_audio = AudioSegment.from_file(fast_path)
-                    await asyncio.sleep(TTS_INTER_REQUEST_DELAY_SEC)
-                except Exception as e:  # noqa: BLE001
-                    # If asking the engine to re-speak faster fails for some
-                    # reason, fall back to a mechanical stretch rather than
-                    # leaving the line overlapping even more than necessary.
-                    logger.warning("Rate-boost regen failed for line %d: %s", i + 1, e)
-                    seg_audio = time_stretch(seg_audio, factor)
-
         segments.append((start_ms, seg_audio))
-        total_duration_ms = max(total_duration_ms, start_ms + len(seg_audio), item["end_ms"])
+        total_duration_ms = max(total_duration_ms, start_ms + len(seg_audio), end_ms)
 
-    # Pass 3: build a silent canvas spanning the whole file and overlay
+    # Second pass: build a silent canvas spanning the whole file and overlay
     # each line at its exact SRT start time. Placing lines by absolute
     # position (instead of concatenating them one after another) means a
     # line that runs slightly long can never push every later line out of
