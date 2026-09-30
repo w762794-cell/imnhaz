@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: srt-tts-telegram-bot
+    name: srt-tts-bot
     env: docker
     plan: free
-    healthCheckPath: /
+
     envVars:
       - key: BOT_TOKEN
         sync: false
